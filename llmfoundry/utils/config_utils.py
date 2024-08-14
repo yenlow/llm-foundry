@@ -294,6 +294,7 @@ def apply_transforms_to_config(
 
 
 def make_dataclass_and_log_config(
+    om,
     cfg: DictConfig,
     dataclass_constructor: Callable[..., T],
     dataclass_fields: Set[str],

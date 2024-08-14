@@ -187,13 +187,14 @@ def _initialize_dist_with_barrier(dist_timeout: Union[int, float]):
     log.debug('Barrier test passed with device.')
 
 
-def train(cfg: DictConfig) -> Trainer:
+def train(om, cfg: DictConfig) -> Trainer:
     code_paths = cfg.get('code_paths', [])
     # Import any user provided code
     for code_path in code_paths:
         import_file(code_path)
 
     logged_cfg, train_cfg = make_dataclass_and_log_config(
+        om,
         cfg,
         TrainConfig,
         TRAIN_CONFIG_KEYS,
@@ -589,7 +590,7 @@ def train(cfg: DictConfig) -> Trainer:
     return trainer
 
 
-def train_from_yaml(
+def train_from_yaml(om,
     yaml_path: str,
     args_list: Optional[List[str]] = None,
 ) -> Trainer:
@@ -602,4 +603,4 @@ def train_from_yaml(
         cli_cfg = om.from_cli(args_list)
         yaml_cfg = om.merge(yaml_cfg, cli_cfg)
     assert isinstance(yaml_cfg, DictConfig)
-    return train(yaml_cfg)
+    return train(om, yaml_cfg)
