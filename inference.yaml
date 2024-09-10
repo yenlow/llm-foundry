@@ -1,0 +1,29 @@
+name: interactive-cpu
+image: mosaicml/llm-foundry:2.3.1_cu121-latest
+
+integrations:
+- integration_type: git_repo
+  git_repo: mosaicml/llm-foundry
+  git_branch: v0.10.0 # use your branch
+  pip_install: .[gpu,databricks]
+  ssh_clone: false # Should be true if using a private repo
+
+command: |
+  
+  cd llm-foundry/scripts/inference
+  python hf_generate.py \
+    --name_or_path dbfs:/databricks/mlflow-tracking/2107924853764306/456c65b8a2ba4978ba595e94b1bd6548/artifacts/checkpoints/huggingface \
+    --temperature 1.0 \
+    --top_p 0.95 \
+    --top_k 50 \
+    --seed 1 \
+    --max_new_tokens 256 \
+    --prompts \
+      "The answer to life, the universe, and happiness is" \
+      "MosaicML is an ML training efficiency startup that is known for" \
+      "Here's a quick recipe for baking chocolate chip cookies: Start by" \
+      "The best 5 cities to visit in Europe are"
+
+compute:
+  gpus: 8
+  cluster: r8z11
