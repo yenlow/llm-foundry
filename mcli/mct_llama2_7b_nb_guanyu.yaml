@@ -1,0 +1,203 @@
+# This Llama2-style model for pre-training YAML is organized as follows:
+  # Parameters:
+    # Global Seed, Max Sequence Length
+    # Model
+      # Model Configuration
+      # Attention Configuration
+      # Feedforward Configuration
+    # Tokenizer
+    # Dataloaders
+      # Train Loader
+      # Eval Loader
+    # Optimization
+      # Scheduler
+      # Optimizer
+      # Algorithms
+    # System
+      # Seed, Device Eval Batch Size, Device Train Microbatch Size, Precision
+      # FSDP Configuration
+      # Logging
+      # Callbacks
+        # Speed Monitor
+        # LR Monitor
+        # Memory Monitor
+        # Runtime Estimator
+# This section under parameters controls the model and training information
+name: llama2-7b-mct
+image: mosaicml/llm-foundry:2.3.0_cu121_flash2-latest
+
+compute:
+  gpus: 8
+  gpu_type: a100_40gb #h100_80gb # a100_40gb # Replace with the type of GPU in the cluster
+  cluster: "r8z11" # "r7z22p1"  # Replace with the cluster name
+
+integrations:
+  - integration_type: git_repo
+    git_branch: v0.8.0
+    git_repo: mosaicml/llm-foundry
+    pip_install: .[gpu,databricks] #need databricks for llm-foundry to log checkpoints
+    ssh_clone: false
+  - integration_type: mlflow
+    experiment_name: /Users/sam.raymond@databricks.com/llama2jumpstart/llama2_testing
+    tracking_uri: databricks
+
+command: |-
+  cd llm-foundry/scripts
+  python data_prep/convert_dataset_hf.py \
+    --dataset c4 --data_subset en \
+    --out_root ./my-copy-c4 \
+    --splits val_small train_small \
+    --concat_tokens 2048 --tokenizer meta-llama/Llama-2-7b-hf --eos_text "<|endoftext|>"  
+  composer train/train.py /mnt/config/parameters.yaml || (echo "Command failed - killing python" && pkill python && exit 1)
+
+parameters:
+  data_local: ./my-copy-c4
+  # data_remote:  # If blank, files must be present in data_local
+  max_seq_len: 2048
+  global_seed: 17
+
+  # Run Name
+  run_name: llama2_7b # If left blank, will be read from env var $RUN_NAME
+
+  # Model - https://huggingface.co/meta-llama/Llama-2-7b-hf/blob/main/config.json; https://github.com/meta-llama/llama
+  # Mapping challenge: HF config has higher level parameters that are nested, or renamed on Mosaic
+  model:
+    name: mpt_causal_lm
+    init_device: meta
+    init_config:
+      init_std: 0.02
+    d_model: 4096 # hidden_size
+    n_heads: 32
+    n_layers: 32
+    expansion_ratio: 2.6875 # intermediate_size / d_model = 11008 / 4096
+    norm_type: rmsnorm # any way to configure the rmsnorm eps value? default = 1e-05 OK in this case since llama uses the same
+    learned_pos_emb: false
+    max_seq_len: ${max_seq_len}
+    vocab_size: 32000
+    attn_config:
+      attn_impl: flash
+      attn_type: grouped_query_attention #| multihead_attention | multiquery_attention
+      attn_uses_sequence_id: false
+      kv_n_heads: 32
+      clip_qkv: 8
+      # rope vs alibi controls whether learning positional embeddings. still possible to use both alibi AND rope.
+      alibi: false # alibi used to shape attention
+      rope: true
+      rope_theta: 500000
+
+    ffn_config: # config used in MPTBlock, not in modeling_mpt
+      ffn_type: mptglu #| mptglu # | mptmlp | te_ln_mlp | mptgeglu
+      ffn_act_fn:
+        name: silu # | glu | selu
+
+  # Tokenizer
+  tokenizer:
+    name: meta-llama/Llama-2-7b-hf
+    kwargs:
+      model_max_length: ${max_seq_len}
+
+  # Dataloaders
+  train_loader:
+    name: text
+    dataset:
+      local: ${data_local}
+      # remote: ${data_remote}
+      split: train_small
+      shuffle: true
+      max_seq_len: ${max_seq_len}
+      shuffle_seed: ${global_seed}
+    drop_last: true
+    num_workers: 8
+
+  eval_loader:
+    name: text
+    dataset:
+      local: ${data_local}
+      # remote: ${data_remote}
+      split: val_small
+      shuffle: false
+      max_seq_len: ${max_seq_len}
+      shuffle_seed: ${global_seed}
+    drop_last: false
+    num_workers: 8
+
+  # Optimization
+  scheduler:
+    name: cosine_with_warmup
+    t_warmup: 100ba
+    alpha_f: 0.1
+
+  optimizer:
+    name: decoupled_adamw
+    lr: 3.0e-4
+    betas:
+    - 0.9
+    - 0.95
+    eps: 1.0e-08
+    weight_decay: 0.000012
+
+  algorithms:
+    gradient_clipping:
+      clipping_type: norm
+      clipping_threshold: 1.0
+
+  max_duration: 500ba #63900ba  # ~ 134B tokens
+  eval_interval: 200ba
+  eval_first: false
+  eval_subset_num_batches: -1
+  global_train_batch_size: 1024 # | 1024
+
+  # System
+  seed: ${global_seed}
+  device_eval_microbatch_size: auto
+  device_train_microbatch_size: auto # | auto
+  precision:  amp_bf16 # | fp32 # | amp_fp16 # | amp_bf16
+
+  # FSDP
+  fsdp_config:
+    sharding_strategy: HYBRID_SHARD # | HYBRID_SHARD
+    mixed_precision: PURE # FULL | PURE | DEFAULT
+    activation_checkpointing: false #true
+    activation_checkpointing_reentrant: false
+    activation_cpu_offload: false
+    limit_all_gathers: false
+    state_dict_type: sharded # | sharded | local | full
+    backward_prefetch: BACKWARD_POST
+
+  # Garbage Collection
+  scheduled_gc:
+    batch_interval: 2000
+
+  # Logging
+  progress_bar: false
+  log_to_console: true
+  console_log_interval: 100ba
+
+  callbacks:
+    hf_checkpointer: ## This is needed to log to Databricks UC along with the mlflow logger
+      overwrite: true
+      precision: bfloat16
+      save_folder: dbfs:/databricks/mlflow-tracking/{mlflow_experiment_id}/{mlflow_run_id}/artifacts/checkpoints
+      save_interval: 100ba
+      mlflow_logging_config:
+        task: llm/v1/chat
+        metadata:
+          task: llm/v1/chat
+      mlflow_registered_model_name: llama2_mct
+    speed_monitor:
+      window_size: 10
+    lr_monitor: {}
+    memory_monitor: {}
+    runtime_estimator: {}
+
+  loggers:
+    mlflow:
+      experiment_name: /Users/sam.raymond@databricks.com/llama2_testing
+      tracking_uri: databricks
+      model_registry_uri: databricks-uc #databricks | databricks-uc
+      model_registry_prefix: sam_raymond_ti3w_da.dbacademy_adv_genai_course
+
+
+  # Checkpoint to local filesystem or remote object store
+  save_interval: 500ba
+  save_num_checkpoints_to_keep: 1  # Important, this cleans up checkpoints saved to DISK
